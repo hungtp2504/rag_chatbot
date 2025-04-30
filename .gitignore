@@ -151,3 +151,5 @@ cython_debug/
 .vscode/
 
 .env
+project_snapshot.txt
+get_project.py

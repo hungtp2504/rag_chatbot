@@ -1,0 +1,16 @@
+streamlit
+langchain
+langgraph
+langchain-openai
+langchain-pinecone
+langchain-community
+openai
+pinecone-client>=3.0.0
+tavily-python
+pypdf
+beautifulsoup4
+lxml
+python-dotenv
+tiktoken
+pymupdf
+arxiv

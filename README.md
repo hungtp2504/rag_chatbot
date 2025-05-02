@@ -1,5 +1,9 @@
 # RAG Chatbot (LangGraph - Pinecone - Tavily - Streamlit)
 
+
+![til](demo.gif)
+
+
 This project implements a versatile chatbot using **LangChain (specifically LangGraph)**, **Pinecone**, **Tavily**, **OpenAI**, and **Streamlit**. It is designed to operate in two primary modes:
 
 1.  **Retrieval-Augmented Generation (RAG)**: Answers questions based on information retrieved from a knowledge base built from user-provided documents (PDFs) or web URLs (including arXiv papers, direct PDF links, and general web pages). This knowledge base is stored and queried using Pinecone.
@@ -7,8 +11,6 @@ This project implements a versatile chatbot using **LangChain (specifically Lang
 
 The application uses LangGraph to manage the conversation flow, routing user queries to the appropriate retrieval mechanism (Pinecone or Tavily) before generating a final answer using an OpenAI language model.
 
-
-![til](demo.gif)
 
 
 ## Features

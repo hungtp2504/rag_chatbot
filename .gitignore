@@ -153,3 +153,5 @@ cython_debug/
 .env
 project_snapshot.txt
 get_project.py
+demo
+project_snapshot.txt

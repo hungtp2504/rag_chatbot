@@ -1,17 +1,12 @@
+import json
 import logging
 import os
 import re
 import tempfile
-import json
 import uuid
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
+
 import requests
-
-from chatbot.config import settings
-
-from pinecone import Pinecone
-
-
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import (
     ArxivLoader,
@@ -21,10 +16,14 @@ from langchain_community.document_loaders import (
 )
 from langchain_community.tools.tavily_search import TavilySearchResults
 from langchain_core.documents import Document
+from langchain_core.embeddings import Embeddings
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_pinecone import PineconeVectorStore
+from pinecone import Index, Pinecone
+
+from chatbot.config import settings
 
 try:
     from pinecone.openapi_support.exceptions import PineconeApiException
@@ -32,7 +31,6 @@ except ImportError:
     PineconeApiException = Exception
 
 from streamlit.runtime.uploaded_file_manager import UploadedFile
-
 
 logger = logging.getLogger("RAG_Chatbot_App")
 
@@ -371,6 +369,13 @@ def clean_metadata_for_pinecone(metadata: Optional[Dict[str, Any]]) -> Dict[str,
     return cleaned_metadata
 
 
+def clear_pinecone_vectorstore(index_name: str):
+    pc = Pinecone(api_key=settings.PINECONE_API_KEY)
+    index = pc.Index(index_name)
+    delete_response = index.delete(delete_all=True)
+    return delete_response
+
+
 def get_pinecone_vectorstore(index_name: str) -> Optional[PineconeVectorStore]:
     """Initializes connection to an existing Pinecone index."""
     logger.info(f"Initializing connection to Pinecone index: {index_name}")
@@ -380,6 +385,7 @@ def get_pinecone_vectorstore(index_name: str) -> Optional[PineconeVectorStore]:
     try:
         pc = Pinecone(api_key=settings.PINECONE_API_KEY)
         index = pc.Index(settings.PINECONE_INDEX_NAME)
+
         embedding_model = OpenAIEmbeddings(model="text-embedding-3-small")
         vectorstore = PineconeVectorStore(index=index, embedding=embedding_model)
 
@@ -411,7 +417,7 @@ def embed_and_upsert(docs: List[Document], vectorstore: PineconeVectorStore) -> 
     for doc in docs:
         cleaned_meta = clean_metadata_for_pinecone(doc.metadata or {})
         batch.append(Document(page_content=doc.page_content, metadata=cleaned_meta))
-        # print(doc)
+
         total_size += len(doc.page_content.encode("utf-8"))
 
         if total_size >= 3 * 1024 * 1024 or len(batch) >= settings.PINECONE_BATCH_SIZE:
@@ -422,146 +428,102 @@ def embed_and_upsert(docs: List[Document], vectorstore: PineconeVectorStore) -> 
     return True
 
 
-# def embed_and_upsert(docs: List[Document], vectorstore: PineconeVectorStore) -> bool:
-#     """
-#     Embeds documents and upserts them ONE BY ONE to Pinecone after cleaning metadata.
-#     Uses direct index.upsert for debugging. Catches correct Pinecone exception.
-#     """
-#     if not docs: logger.warning("No documents to embed and upsert."); return False
-#     if not vectorstore: logger.error("Invalid vectorstore provided."); return False
-#     # Safely access the index object
-#     try:
-#         index = vectorstore.index
-#         if index is None: raise AttributeError("vectorstore.index is None")
-#     except AttributeError:
-#          logger.error("Cannot access the raw Pinecone index object via vectorstore.index.")
-#          return False
-#     # Safely access the embedding function
-#     try:
-#         # Correct attribute is likely embeddings, not embedding
-#         embedder = vectorstore.embeddings
-#         if embedder is None: raise AttributeError("vectorstore.embeddings is None")
-#     except AttributeError:
-#         logger.error("Cannot access the embedding function via vectorstore.embeddings. Initializing fallback.")
-#         try:
-#             # Ensure API key is available for fallback
-#             if not settings.OPENAI_API_KEY: raise ValueError("OPENAI_API_KEY needed for fallback embedder")
-#             embedder = OpenAIEmbeddings(model="text-embedding-3-small", openai_api_key=settings.OPENAI_API_KEY)
-#         except Exception as init_err:
-#              logger.error(f"Failed to initialize fallback OpenAIEmbeddings: {init_err}", exc_info=True)
-#              return False
-
-
-#     index_name = getattr(vectorstore, 'index_name', '[Unknown Index]')
-#     logger.info(f"Starting MANUAL embed/upsert of {len(docs)} chunks one-by-one to index '{index_name}'...")
-
-#     success_count = 0
-#     fail_count = 0
-#     # Use the namespace associated with the vectorstore object if available
-#     # Note: _namespace might be internal, check Langchain docs for public access method if needed
-#     namespace = getattr(vectorstore, '_namespace', None)
-#     logger.info(f"Using Pinecone namespace: '{namespace}'")
-
-#     for i, doc in enumerate(docs):
-#         logger.debug(f"Processing document {i+1}/{len(docs)}...")
-
-#         # 1. Clean Metadata
-#         cleaned_metadata = clean_metadata_for_pinecone(doc.metadata or {})
-#         logger.debug(f"Cleaned metadata for doc {i}: {cleaned_metadata}")
-
-#         # 2. Generate Embedding
-#         try:
-#             # Use embed_query for single text embedding
-#             vector = embedder.embed_query(doc.page_content)
-#             logger.debug(f"Generated embedding for doc {i} (size: {len(vector)})")
-#         except Exception as embed_err:
-#             logger.error(f"Failed to generate embedding for doc {i}: {embed_err}", exc_info=True)
-#             fail_count += 1
-#             continue # Skip to the next document
-
-#         # 3. Generate ID
-#         doc_id = uuid.uuid4().hex
-#         logger.debug(f"Generated ID for doc {i}: {doc_id}")
-
-#         # 4. Prepare vector tuple for Pinecone upsert
-#         vector_tuple = (doc_id, vector, cleaned_metadata)
-
-#         # 5. Upsert SINGLE vector
-#         try:
-#             logger.debug(f"Attempting to upsert vector for doc {i} (ID: {doc_id}) into namespace '{namespace}'...")
-#             # Use the raw index object's upsert method
-#             upsert_response = index.upsert(vectors=[vector_tuple], namespace=namespace)
-#             logger.debug(f"Upsert response for doc {i}: {upsert_response}")
-#             success_count += 1
-#         except PineconeApiException as pinecone_err:
-#             # Catch the CORRECTED Pinecone specific API errors
-#             logger.error(f"Pinecone API Error upserting doc {i} (ID: {doc_id}): {pinecone_err}", exc_info=True)
-#             logger.error(f"--- Failing vector metadata (doc {i}): {cleaned_metadata}")
-#             logger.error(f"--- Failing vector content preview (doc {i}): {doc.page_content[:300]}...")
-#             fail_count += 1
-#             # break # Optional: Stop on first error
-#         except Exception as other_err:
-#             # Catch other potential errors during upsert
-#             logger.error(f"Unexpected Error upserting doc {i} (ID: {doc_id}): {other_err}", exc_info=True)
-#             fail_count += 1
-#             # break # Optional: Stop on first error
-
-#     logger.info(f"Manual upsert process finished. Successful: {success_count}, Failed: {fail_count}")
-#     # Return True only if all documents were successfully upserted
-#     return fail_count == 0
-
-
 def similarity_search(
     query: str, vectorstore: PineconeVectorStore, k: int = settings.TOP_K
-) -> str:
-    """Performs similarity search and returns formatted context string."""
+) -> Tuple[str, List[str], List[float]]:
+    """
+    Performs similarity search using the Pinecone client directly to get IDs and scores.
+    Returns formatted context string, chunk IDs, and scores.
+    """
     if not vectorstore:
-        logger.error("Invalid vectorstore for similarity_search.")
-        return ""
+        logger.error("Invalid vectorstore provided for similarity_search.")
+        return "", [], []
+
+    if not isinstance(vectorstore, PineconeVectorStore):
+        logger.error(
+            f"Vectorstore is not a PineconeVectorStore instance (Type: {type(vectorstore)}). Cannot perform direct query."
+        )
+
+        return "", [], []
+
     index_name = getattr(vectorstore, "index_name", "[Unknown Index]")
     logger.info(
-        f"Performing similarity search (k={k}) on index '{index_name}' for query: '{query[:50]}...'"
+        f"Performing similarity search (k={k}) via Pinecone client on index '{index_name}' for query: '{query[:50]}...'"
     )
+
+    context = ""
+    chunk_ids = []
+    chunk_scores = []
+
     try:
-        retrieved_docs = vectorstore.similarity_search(query, k=k)
-        if retrieved_docs:
-            context = "\n\n---\n\n".join([doc.page_content for doc in retrieved_docs])
+
+        embedder: Optional[Embeddings] = vectorstore.embeddings
+        index: Optional[Index] = vectorstore.index
+
+        if embedder is None or index is None:
+            logger.error(
+                "Could not access embedder or index from the provided PineconeVectorStore object."
+            )
+            return "", [], []
+
+        query_vector: List[float] = embedder.embed_query(query)
+        logger.debug(
+            f"Generated query embedding (vector dimension: {len(query_vector)})"
+        )
+
+        namespace: Optional[str] = getattr(vectorstore, "_namespace", None)
+        logger.debug(f"Querying Pinecone index directly (namespace: '{namespace}')...")
+
+        results = index.query(
+            vector=query_vector,
+            top_k=k,
+            include_metadata=True,
+            namespace=namespace,
+        )
+        logger.debug(f"Pinecone client query raw response: {results}")
+
+        if results and results.matches:
+            retrieved_docs_content = []
+            for match in results.matches:
+                score: float = match.score
+                doc_id: str = match.id
+                metadata: Dict[str, Any] = match.metadata or {}
+
+                text_key = "text"
+                page_content: str = metadata.get(text_key, "")
+
+                if not page_content:
+
+                    logger.warning(
+                        f"Matched vector ID '{doc_id}' has no text content in metadata under key '{text_key}'. Metadata: {metadata}"
+                    )
+
+                chunk_ids.append(doc_id)
+                chunk_scores.append(score)
+                retrieved_docs_content.append(page_content)
+
+            context = "\n\n---\n\n".join(retrieved_docs_content)
             logger.info(
-                f"Similarity search found {len(retrieved_docs)} relevant chunks."
+                f"Pinecone client search found {len(results.matches)} relevant chunks. IDs: {chunk_ids}, Scores: {['{:.4f}'.format(s) for s in chunk_scores]}"
             )
-            return context
         else:
-            logger.info("Similarity search found no matching chunks.")
-            return ""
-    except Exception as e:
-        logger.error(f"Error during similarity search: {e}", exc_info=True)
-        return ""
+            logger.info("Pinecone client search found no matching chunks.")
 
+    except AttributeError as ae:
 
-def web_search(query: str, max_results: int = settings.TAVILY_MAX_RESULTS) -> str:
-    """Performs web search using Tavily and returns formatted results string."""
-    logger.info(
-        f"Performing web search via Tavily (max_results={max_results}) for query: '{query[:50]}...'"
-    )
-    try:
-        tavily_tool = TavilySearchResults(max_results=max_results)
-        results = tavily_tool.invoke(query)
-        if results and isinstance(results, list):
-            formatted_results = "\n\n---\n\n".join(
-                [
-                    f"Source: {res.get('url', 'N/A')}\nContent: {res.get('content', '')}"
-                    for res in results
-                    if isinstance(res, dict)
-                ]
-            )
-            logger.info(f"Web search found {len(results)} results.")
-            return formatted_results
-        else:
-            logger.info("Web search found no results or invalid format.")
-            return ""
+        logger.error(
+            f"Attribute error accessing vectorstore properties: {ae}. Ensure vectorstore is a correctly initialized PineconeVectorStore.",
+            exc_info=True,
+        )
+        return "", [], []
     except Exception as e:
-        logger.error(f"Error during Tavily search: {e}", exc_info=True)
-        return ""
+
+        logger.error(
+            f"Error during direct Pinecone similarity search: {e}", exc_info=True
+        )
+        return "", [], []
+
+    return context, chunk_ids, chunk_scores
 
 
 def get_llm() -> Optional[ChatOpenAI]:
@@ -576,8 +538,47 @@ def get_llm() -> Optional[ChatOpenAI]:
         return None
 
 
-# If the information is not available in the context, state that you could not find the information in the provided documents.
-# Answer politely and in detail. DO NOT make up information. Always answer in English.
+def web_search(
+    query: str, max_results: int = settings.TAVILY_MAX_RESULTS
+) -> Tuple[str, List[str]]:
+    """Performs web search using Tavily and returns formatted results string and source URLs."""
+    logger.info(
+        f"Performing web search via Tavily (max_results={max_results}) for query: '{query[:50]}...'"
+    )
+    source_urls = []
+    formatted_results = ""
+    try:
+        tavily_tool = TavilySearchResults(max_results=max_results)
+
+        results: List[Dict[str, Any]] = tavily_tool.invoke(query)
+
+        if results and isinstance(results, list):
+
+            extracted_content = []
+            for res in results:
+                if isinstance(res, dict):
+                    url = res.get("url", "N/A")
+                    content = res.get("content", "")
+                    if url != "N/A":
+                        source_urls.append(url)
+                    extracted_content.append(f"Source: {url}\nContent: {content}")
+
+            formatted_results = "\n\n---\n\n".join(extracted_content)
+            logger.info(
+                f"Web search found {len(results)} results. Extracted {len(source_urls)} URLs."
+            )
+        else:
+            logger.info("Web search found no results or invalid format.")
+
+    except Exception as e:
+        logger.error(f"Error during Tavily search: {e}", exc_info=True)
+
+    return (
+        formatted_results,
+        source_urls,
+    )
+
+
 def create_rag_prompt() -> ChatPromptTemplate:
     """Creates the prompt template for RAG (English)."""
     logger.debug("Creating prompt template for RAG.")

@@ -4,7 +4,6 @@ from typing import Any, Dict, Generator, List, Literal, Optional, TypedDict
 import streamlit as st
 from langgraph.graph import END, StateGraph
 
-
 try:
     from .components import (
         create_generation_chain,
@@ -18,7 +17,7 @@ try:
 except ImportError:
 
     try:
-        from components import (
+        from llm.components import (
             create_generation_chain,
             create_rag_prompt,
             create_web_search_prompt,
@@ -57,6 +56,10 @@ class GraphState(TypedDict):
     generation: Optional[str]
     generation_stream: Optional[Generator[Any, None, None]]
     status_message: str
+    web_search_sources: Optional[List[str]]
+    rag_chunk_ids: Optional[List[str]]
+    rag_chunk_scores: Optional[List[float]]
+    run_status_history: List[str]
 
 
 def route_query(
@@ -106,55 +109,96 @@ def inform_no_rag_data(state: GraphState) -> Dict[str, Any]:
 
 
 def retrieve_context(state: GraphState) -> Dict[str, Any]:
-    """Retrieves context from the vector store for RAG."""
+    """Retrieves context, IDs, and scores from the vector store for RAG."""
     logger.info("Executing 'retrieve_context' node (RAG).")
     query = state["query"]
     vectorstore = st.session_state.get("vectorstore", None)
     status_update = "Querying RAG Vector Store..."
+
+    run_history = state.get("run_status_history", [])
+    run_history.append(status_update)
+
     context = ""
+    chunk_ids = []
+    chunk_scores = []
 
     if vectorstore:
         try:
-            context = similarity_search(query, vectorstore)
+            context, chunk_ids, chunk_scores = similarity_search(query, vectorstore)
             if context:
-                status_update = "Retrieved context from RAG Vector Store."
-                logger.info(
-                    f"RAG context retrieval successful (length {len(context)})."
-                )
+                status_update = f"Retrieved context from {len(chunk_ids)} RAG chunks."
+
+                if chunk_ids and chunk_scores:
+                    chunk_details = [
+                        f"  - Chunk {i+1}: ID=`{chunk_id}` (Score: {score:.4f})"
+                        for i, (chunk_id, score) in enumerate(
+                            zip(chunk_ids, chunk_scores)
+                        )
+                    ]
+                    detail_status = "Retrieved RAG Chunks:\n" + "\n".join(chunk_details)
+                    run_history.append(detail_status)
+                else:
+                    run_history.append(status_update)
             else:
                 status_update = "No relevant RAG context found."
-                logger.info("No relevant RAG context found.")
+                run_history.append(status_update)
         except Exception as e:
-            logger.error(f"Error during RAG query: {e}", exc_info=True)
-            status_update = f"Error querying RAG: {e}"
-            context = ""
+            logger.error(f"Error during RAG similarity_search call: {e}", exc_info=True)
+            status_update = f"Error querying RAG Vector Store: {e}"
+            run_history.append(status_update)
+            context, chunk_ids, chunk_scores = "", [], []
     else:
-        logger.error("RAG Vector Store not available in retrieve_context node.")
-        status_update = "Error: RAG Vector Store not ready."
+        status_update = "Error: RAG Vector Store not initialized or available."
+        run_history.append(status_update)
 
-    return {"context": context or "", "status_message": status_update}
+    return {
+        "context": context or "",
+        "status_message": status_update,
+        "rag_chunk_ids": chunk_ids,
+        "rag_chunk_scores": chunk_scores,
+        "run_status_history": run_history,
+    }
 
 
 def search_web(state: GraphState) -> Dict[str, Any]:
-    """Performs web search using Tavily."""
+    """Performs web search using Tavily and stores context and sources."""
     logger.info("Executing 'search_web' node.")
     query = state["query"]
     status_update = "Searching the web..."
+    run_history = state.get("run_status_history", [])
+    run_history.append(status_update)
+
     context = ""
+    source_urls = []
+
     try:
-        context = web_search(query)
+        context, source_urls = web_search(query)
         if context:
-            status_update = "Retrieved information from web search."
-            logger.info(f"Web search successful (length {len(context)}).")
+            status_update = (
+                f"Retrieved information from {len(source_urls)} web sources."
+            )
+
+            if source_urls:
+                source_list_str = "\n".join([f"  - `{s}`" for s in source_urls])
+                detail_status = f"Retrieved Web Sources:\n{source_list_str}"
+                run_history.append(detail_status)
+            else:
+                run_history.append(status_update)
         else:
             status_update = "No relevant information found on the web."
-            logger.info("Web search returned no results.")
+            run_history.append(status_update)
     except Exception as e:
-        logger.error(f"Error during web search: {e}", exc_info=True)
+        logger.error(f"Error during web search execution: {e}", exc_info=True)
         status_update = f"Error searching web: {e}"
-        context = ""
+        run_history.append(status_update)
+        context, source_urls = "", []
 
-    return {"context": context or "", "status_message": status_update}
+    return {
+        "context": context or "",
+        "status_message": status_update,
+        "web_search_sources": source_urls,
+        "run_status_history": run_history,
+    }
 
 
 def generate_answer(state: GraphState) -> Dict[str, Any]:
@@ -163,6 +207,8 @@ def generate_answer(state: GraphState) -> Dict[str, Any]:
     query = state["query"]
     context = state.get("context", "")
     chat_history_list = state.get("chat_history", [])
+    run_history = state.get("run_status_history", [])
+
     mode = state.get("chatbot_mode")
 
     llm = get_llm()
@@ -205,33 +251,47 @@ def generate_answer(state: GraphState) -> Dict[str, Any]:
         }
 
     chain_input = {
-        "query": query,
-        "context": context if context else "No context provided.",
-        "chat_history": formatted_history,
+        "query": state["query"],
+        "context": state.get("context", "No context provided."),
+        "chat_history": format_chat_history(state.get("chat_history", [])),
     }
-    logger.debug(f"Input context length for LLM: {len(chain_input['context'])}")
 
     stream_to_return = iter([])
     final_status = "Starting answer generation..."
+    run_history.append(final_status)
+
     try:
+        generation_chain = create_generation_chain(
+            get_llm(),
+            (
+                create_rag_prompt()
+                if state.get("chatbot_mode") == "RAG"
+                else create_web_search_prompt()
+            ),
+        )
         logger.info("Calling stream on generation_chain...")
         _raw_stream = generation_chain.stream(chain_input)
+
         if hasattr(_raw_stream, "__iter__") or hasattr(_raw_stream, "__aiter__"):
             stream_to_return = _raw_stream
             final_status = "Receiving data from LLM..."
+            run_history.append(final_status)
             logger.info("Successfully started streaming from LLM.")
         else:
             logger.error(
                 f"generation_chain.stream did not return an iterator! Type: {type(_raw_stream)}"
             )
             final_status = "Error: Did not receive a valid stream from LLM."
+            run_history.append(final_status)
     except Exception as e:
         logger.error(f"Error calling generation_chain.stream: {e}", exc_info=True)
         final_status = f"Error generating answer: {e}"
+        run_history.append(final_status)
 
     return {
         "generation_stream": stream_to_return,
         "status_message": final_status,
+        "run_status_history": run_history,
     }
 
 
@@ -242,7 +302,6 @@ def build_graph() -> StateGraph:
     graph.add_node("retrieve", retrieve_context)
     graph.add_node("web_search", search_web)
     graph.add_node("generate", generate_answer)
-    graph.add_node("inform_no_rag_data", inform_no_rag_data)
 
     logger.debug(
         "Adding conditional edges from entry point (__start__) based on route_query."

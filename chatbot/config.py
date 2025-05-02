@@ -2,8 +2,9 @@ import logging
 import logging.handlers
 import os
 import sys
-from dotenv import load_dotenv
 from typing import Optional
+
+from dotenv import load_dotenv
 
 
 class Settings:
@@ -94,7 +95,7 @@ def setup_logging():
             handler.close()
 
     if APP_VERBOSE:
-        # print(f"--- CONFIG: VERBOSE MODE ENABLED: Logging to '{log_file}' at level '{logging.getLevelName(log_level)}' ---", file=sys.stderr)
+
         formatter = logging.Formatter(LOG_FORMAT, datefmt=LOG_DATE_FORMAT)
         try:
             file_handler = logging.FileHandler(log_file, mode="w", encoding="utf-8")
@@ -106,7 +107,7 @@ def setup_logging():
                 f"VERBOSE File Logging Started (Overwrite Mode). Level: {log_level_str}"
             )
         except Exception as e:
-            # print(f"--- FATAL ERROR: Failed to configure file logging for {log_file}: {e} ---", file=sys.stderr)
+
             app_logger.addHandler(logging.NullHandler())
     else:
 

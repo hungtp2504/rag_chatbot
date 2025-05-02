@@ -7,6 +7,10 @@ This project implements a versatile chatbot using **LangChain (specifically Lang
 
 The application uses LangGraph to manage the conversation flow, routing user queries to the appropriate retrieval mechanism (Pinecone or Tavily) before generating a final answer using an OpenAI language model.
 
+
+![til](demo.gif)
+
+
 ## Features
 
 -   **Dual Modes**: Seamlessly switch between RAG and Web Search modes.

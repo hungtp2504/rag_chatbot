@@ -1,6 +1,6 @@
 # RAG Chatbot (LangGraph - Pinecone - Tavily - Streamlit)
 
-![til](demo.gif)
+![til](rag_demo.gif)
 
 
 This project implements a versatile chatbot using **LangChain (specifically LangGraph)**, **Pinecone**, **Tavily**, **OpenAI**, and **Streamlit**. It is designed to operate in two primary modes:

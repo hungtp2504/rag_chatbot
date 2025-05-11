@@ -3,6 +3,12 @@ import uuid
 
 import streamlit as st
 
+try:
+    from .ui_speech import display_voice_recorder_st_native
+except ImportError:
+    from chatbot.ui_speech import display_voice_recorder_st_native
+
+
 logger = logging.getLogger("RAG_Chatbot_App")
 
 
@@ -121,52 +127,64 @@ def handle_note_deletion(note_index_to_delete: int):
 
 
 def display_sidebar():
-    """Displays all sidebar content, including conditional RAG and Notes."""
+    """Displays all sidebar content, including voice recorder, RAG, and Notes."""
+    transcribed_prompt_from_sidebar = None
+    uploaded_files_sidebar = None
+    urls_sidebar = ""
+    process_rag_button_sidebar = False
+
     with st.sidebar:
         st.header("Chatbot Configuration")
 
         mode_options = ["Web Search (Tavily)", "RAG (Uploaded Documents)"]
+
         current_mode_internal = st.session_state.get("mode_internal", "Web Search")
-        current_mode_index = 0 if current_mode_internal == "Web Search" else 1
+
+        if current_mode_internal == "RAG":
+            initial_radio_index = 1
+        else:
+            initial_radio_index = 0
+
         st.radio(
             "Select operating mode:",
             options=mode_options,
             key="chatbot_mode_selector",
-            index=current_mode_index,
+            index=initial_radio_index,
             on_change=update_chatbot_mode,
         )
         st.markdown("---")
 
-        uploaded_files = None
-        urls = ""
-        process_rag_button = False
-        if current_mode_internal == "RAG":
+        st.subheader("🎙️ Recording")
+        transcribed_prompt_from_sidebar = display_voice_recorder_st_native()
+        st.markdown("---")
+
+        if st.session_state.get("mode_internal") == "RAG":
             with st.container():
                 st.header("RAG Data Sources")
-                uploaded_files = st.file_uploader(
+                uploaded_files_sidebar = st.file_uploader(
                     "Upload PDF files",
                     type=["pdf"],
                     accept_multiple_files=True,
-                    key="pdf_uploader",
+                    key="pdf_uploader_sidebar",
                 )
-                urls = st.text_area("Or enter URLs (one per line)", key="url_input")
-                process_rag_button = st.button(
-                    "Process RAG Sources", key="process_sources_btn"
+                urls_sidebar = st.text_area(
+                    "Or enter URLs (one per line)", key="url_input_sidebar"
+                )
+                process_rag_button_sidebar = st.button(
+                    "Process RAG Sources", key="process_sources_btn_sidebar"
                 )
 
                 if st.session_state.get("processed_sources"):
                     st.subheader("Processed Sources (for RAG):")
                     for src in st.session_state.processed_sources:
                         st.write(f"- {src}")
-
             st.markdown("---")
 
         st.header("Notes")
-
         with st.expander("Add a New Note", expanded=False):
             title_key = "note_title_sidebar"
             content_key = "note_content_sidebar"
-            with st.form(key="note_form_sidebar_v2"):
+            with st.form(key="note_form_sidebar_v2_unique"):
                 st.text_input(
                     "Note Title:", key=title_key, placeholder="E.g., Meeting Summary"
                 )
@@ -184,34 +202,32 @@ def display_sidebar():
 
         if "session_notes" in st.session_state and st.session_state.session_notes:
             st.subheader("Existing Notes")
-            notes_list = st.session_state.session_notes
-            for i in range(len(notes_list)):
-                if i < len(notes_list):
-                    note = notes_list[i]
-                    note_title = note.get("title", "Untitled")
-                    note_content = note.get("content", "*No content*")
-                    note_id = note.get("id", "N/A")
+            notes_list = list(st.session_state.session_notes)
+            for i, note in enumerate(notes_list):
+                note_title = note.get("title", "Untitled")
+                note_content = note.get("content", "*No content*")
+                note_id = note.get("id", f"note_default_id_{i}")
 
-                    col_expander, col_button = st.columns([0.85, 0.15])
-                    with col_expander:
-
-                        with st.expander(f"{note_title}", expanded=False):
-
-                            st.markdown(note_content)
-
-                    with col_button:
-
-                        delete_key = f"delete_note_{note_id}_{i}"
-                        st.button(
-                            "🗑️",
-                            type="tertiary",
-                            use_container_width=True,
-                            key=delete_key,
-                            on_click=handle_note_deletion,
-                            args=(i,),
-                            help="Delete this note",
-                        )
-
+                col_expander, col_button = st.columns([0.85, 0.15])
+                with col_expander:
+                    with st.expander(f"{note_title}", expanded=False):
+                        st.markdown(note_content)
+                with col_button:
+                    delete_key = f"delete_note_{note_id}_{i}_sidebar"
+                    st.button(
+                        "🗑️",
+                        type="tertiary",
+                        use_container_width=True,
+                        key=delete_key,
+                        on_click=handle_note_deletion,
+                        args=(i,),
+                        help="Delete this note",
+                    )
             st.markdown("---")
 
-    return uploaded_files, urls, process_rag_button
+    return (
+        uploaded_files_sidebar,
+        urls_sidebar,
+        process_rag_button_sidebar,
+        transcribed_prompt_from_sidebar,
+    )

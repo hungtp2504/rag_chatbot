@@ -3,132 +3,168 @@ from typing import Any, Dict, Generator, List
 
 import streamlit as st
 
+st.set_page_config(page_title="Versatile Chatbot", layout="wide")
+
 try:
     from chatbot.config import settings, setup_logging
     from chatbot.processing import process_rag_sources
-    from chatbot.state_manager import (
-        initialize_session_state,
-    )
+    from chatbot.state_manager import initialize_session_state
     from chatbot.ui_chat import display_ai_message_elements, display_chat_history
     from chatbot.ui_sidebar import display_sidebar
     from llm.graph_logic import GraphState
 except ImportError as e:
-    st.error(f"Failed to import necessary project modules: {e}. Please check paths.")
-    st.stop()
+    try:
+        from config import settings, setup_logging
+        from processing import process_rag_sources
+        from state_manager import initialize_session_state
+        from ui_chat import display_ai_message_elements, display_chat_history
+        from ui_sidebar import display_sidebar
 
+        from llm.graph_logic import GraphState
 
-logger = setup_logging()
-
-
-if "PINECONE_INDEX_NAME" not in st.session_state:
-    if hasattr(settings, "PINECONE_INDEX_NAME") and settings.PINECONE_INDEX_NAME:
-        st.session_state.PINECONE_INDEX_NAME = settings.PINECONE_INDEX_NAME
-    else:
-        st.error("Critical Error: Pinecone index name not configured in settings.")
+        st.warning(
+            "Using fallback imports. This might not work correctly if the project structure is complex or if files are not in the expected locations."
+        )
+        if "streamlit_defined_logger" not in st.session_state:
+            st.session_state.streamlit_defined_logger = True
+    except ImportError as e_fallback:
+        st.error(
+            f"Could not import necessary project modules: {e}. Fallback error: {e_fallback}. Please check your paths and directory structure."
+        )
         st.stop()
 
+logger = setup_logging()
 initialize_session_state()
 
-
-st.set_page_config(page_title="Versatile Chatbot", layout="wide")
-st.title("Versatile Chatbot (RAG / Web Search)")
+st.title("Versatile Chatbot (RAG / Web Search / Voice)")
 
 css = r"""
     <style>
         [data-testid="stForm"] {border: 0px}
     </style>
 """
-
 st.markdown(css, unsafe_allow_html=True)
 
 
-uploaded_files, urls, process_rag_button = display_sidebar()
+uploaded_files, urls, process_rag_button_clicked, transcribed_prompt_from_sidebar = (
+    display_sidebar()
+)
 
-if process_rag_button:
-    if uploaded_files is not None or urls:
+if process_rag_button_clicked:
+    if uploaded_files or (urls and urls.strip()):
         process_rag_sources(uploaded_files, urls)
     else:
-        logger.warning("Process RAG button clicked, but RAG sources are not available.")
-
+        logger.warning(
+            "RAG processing button was clicked, but no RAG sources (files or URLs) were provided."
+        )
+        st.warning("Please provide PDF files or enter URLs to process for RAG mode.")
 
 current_mode_internal = st.session_state.get("mode_internal", "Web Search")
-display_mode = "Web Search (Tavily)" if current_mode_internal == "Web Search" else "RAG"
-st.markdown(f"**Current Mode:** {display_mode}")
+display_mode_text = (
+    "Web Search (Tavily)"
+    if current_mode_internal == "Web Search"
+    else "RAG (Uploaded Documents)"
+)
+st.markdown(f"**Current operating mode:** {display_mode_text}")
+
 
 display_chat_history()
 
 
-if prompt := st.chat_input("Enter your question here..."):
+typed_prompt = st.chat_input("Nhập câu hỏi của bạn ở đây...")
+
+current_prompt_to_process = None
+if transcribed_prompt_from_sidebar:
+    current_prompt_to_process = transcribed_prompt_from_sidebar
+    logger.info(f"Voice input from sidebar: '{current_prompt_to_process}'")
+elif typed_prompt:
+    current_prompt_to_process = typed_prompt
+    logger.info(f"Text input from chat_input: '{current_prompt_to_process}'")
+
+
+if current_prompt_to_process:
+
     logger.info(
-        f"Received question (Mode: {current_mode_internal}, Length: {len(prompt)})."
+        f"Processing question (Mode: {current_mode_internal}, Length: {len(current_prompt_to_process)})."
     )
-    st.session_state.messages.append({"role": "user", "content": prompt})
+    st.session_state.messages.append(
+        {"role": "user", "content": current_prompt_to_process}
+    )
+
     with st.chat_message("user", avatar="👤"):
-        st.markdown(prompt)
+        st.markdown(current_prompt_to_process)
 
     with st.chat_message("ai", avatar="🤖"):
-
         response_placeholder, status_list_placeholder = display_ai_message_elements()
 
         if "graph" not in st.session_state or st.session_state.graph is None:
-            st.error("Chat logic graph is not initialized.")
-            logger.error("Graph not found in session state.")
+            error_content = "Error: Chat logic graph has not been initialized. Please try refreshing the page."
 
+            response_placeholder.markdown(error_content)
+            status_list_placeholder.markdown("- ❌ Graph Initialization Error")
             st.session_state.messages.append(
                 {
                     "role": "assistant",
-                    "content": "Error: Chat logic graph is not initialized.",
-                    "steps": ["❌ Initialization Error"],
+                    "content": error_content,
+                    "steps": ["❌ Graph Initialization Error"],
                 }
             )
-            st.rerun()
         else:
+
             compiled_graph = st.session_state.graph
             full_response = ""
-            graph_error = None
+            graph_error_occurred = None
+            history_for_graph = st.session_state.messages[:-1]
 
-            final_run_status_history = ["Processing started..."]
+            final_run_status_history: List[str] = [
+                "▶️ Starting to process the question..."
+            ]
+            if status_list_placeholder:
+                status_list_placeholder.markdown("- " + final_run_status_history[-1])
 
             try:
                 graph_input: GraphState = {
-                    "query": prompt,
-                    "chat_history": st.session_state.messages[:-1],
+                    "query": current_prompt_to_process,
+                    "chat_history": history_for_graph,
                     "chatbot_mode": current_mode_internal,
                     "use_rag": st.session_state.get("vectorstore") is not None,
                     "context": None,
                     "generation": None,
                     "generation_stream": None,
-                    "status_message": "Processing started...",
+                    "status_message": "Starting processing...",
                     "web_search_sources": None,
                     "rag_chunk_ids": None,
                     "rag_chunk_scores": None,
-                    "run_status_history": ["Processing started..."],
+                    "run_status_history": list(final_run_status_history),
                 }
-                logger.debug(
-                    f"Graph input prepared (excluding history): { {k: v for k, v in graph_input.items() if k != 'chat_history'} }"
-                )
 
                 events: Generator[Dict[str, Any], None, None] = compiled_graph.stream(
                     graph_input, config={"recursion_limit": 10}
                 )
 
-                latest_full_history_from_graph = final_run_status_history[:]
-
                 for event in events:
-                    logger.debug(f"Graph event: {event}")
+                    logger.debug(f"Event from Graph: {event}")
                     event_keys = list(event.keys())
                     if not event_keys or event_keys[0] == "__end__":
+                        if event_keys and event_keys[0] == "__end__":
+                            final_node_output = event.get(event_keys[0])
+                            if isinstance(
+                                final_node_output, dict
+                            ) and final_node_output.get("run_status_history"):
+                                final_run_status_history = final_node_output.get(
+                                    "run_status_history", final_run_status_history
+                                )
                         continue
+
                     node_name = event_keys[0]
                     node_output = event.get(node_name)
 
-                    current_status_display_list = []
                     if isinstance(node_output, dict):
-
-                        latest_full_history_from_graph = node_output.get(
-                            "run_status_history", latest_full_history_from_graph
-                        )
-                        current_status_display_list = latest_full_history_from_graph
+                        new_history_from_node = node_output.get("run_status_history")
+                        if new_history_from_node and isinstance(
+                            new_history_from_node, list
+                        ):
+                            final_run_status_history = new_history_from_node
 
                         if node_name in ["generate", "inform_no_rag_data"]:
                             generation_stream = node_output.get("generation_stream")
@@ -137,7 +173,6 @@ if prompt := st.chat_input("Enter your question here..."):
                             ):
                                 try:
                                     for chunk in generation_stream:
-
                                         chunk_content = getattr(
                                             chunk,
                                             "content",
@@ -145,76 +180,89 @@ if prompt := st.chat_input("Enter your question here..."):
                                         )
                                         if chunk_content:
                                             full_response += chunk_content
-                                            response_placeholder.markdown(
-                                                full_response + "▌"
-                                            )
+                                            if response_placeholder:
+                                                response_placeholder.markdown(
+                                                    full_response + "▌"
+                                                )
                                 except Exception as stream_ex:
                                     logger.error(
-                                        f"Error iterating stream from '{node_name}': {stream_ex}",
+                                        f"Error iterating through stream from node '{node_name}': {stream_ex}",
                                         exc_info=True,
                                     )
-                                    graph_error = stream_ex
-
-                                    current_status_display_list.append(
-                                        f"❌ Error reading AI stream: {stream_ex}"
+                                    graph_error_occurred = stream_ex
+                                    final_run_status_history.append(
+                                        f"⚠️ Stream Error: {stream_ex}"
                                     )
+                                    break
 
-                    status_markdown = "\n".join(
-                        [f"- {s}" for s in current_status_display_list]
-                    )
-                    status_list_placeholder.markdown(status_markdown)
+                    if status_list_placeholder:
+                        status_markdown = "\n".join(
+                            [f"- {s}" for s in final_run_status_history]
+                        )
+                        status_list_placeholder.markdown(status_markdown)
 
-                final_run_status_history = latest_full_history_from_graph
+                    if graph_error_occurred:
+                        break
 
-                if graph_error:
-                    final_status_msg = f"❌ Error: {graph_error}"
+                if graph_error_occurred:
+                    error_message_for_user = f"Sorry, an error occurred during processing: {graph_error_occurred}"
                     if not full_response:
-                        full_response = (
-                            f"Sorry, an error occurred during processing: {graph_error}"
+                        full_response = error_message_for_user
+                    if (
+                        final_run_status_history
+                        and final_run_status_history[-1]
+                        != f"❌ Critical Error: {graph_error_occurred}"
+                    ):
+                        final_run_status_history.append(
+                            f"❌ Error: {graph_error_occurred}"
                         )
                 else:
-                    final_status_msg = "✅ Completed!"
                     if not full_response:
-                        full_response = "Sorry, I couldn't generate a response based on the information found."
+                        full_response = "Sorry, I couldn't find the information or generate an answer."
+                        final_run_status_history.append("⚠️ No response generated.")
+                    else:
+                        final_run_status_history.append("✅ Completed!")
 
-                if (
-                    not final_run_status_history
-                    or final_status_msg != final_run_status_history[-1]
-                ):
-                    final_run_status_history.append(final_status_msg)
-
-                status_markdown = "\n".join(
-                    [f"- {s}" for s in final_run_status_history]
-                )
-                status_list_placeholder.markdown(status_markdown)
-                response_placeholder.markdown(full_response)
-
-                st.session_state.messages.append(
-                    {
-                        "role": "assistant",
-                        "content": full_response,
-                        "steps": final_run_status_history,
-                    }
-                )
+                if status_list_placeholder:
+                    status_markdown_final = "\n".join(
+                        [f"- {s}" for s in final_run_status_history]
+                    )
+                    status_list_placeholder.markdown(status_markdown_final)
+                if response_placeholder:
+                    response_placeholder.markdown(full_response)
 
             except Exception as e:
-                graph_error = e
-                error_message = f"Critical error running chat logic: {graph_error}"
-                logger.error(error_message, exc_info=True)
 
-                final_run_status_history.append(f"❌ {error_message}")
-
-                full_response = f"Sorry, a critical error occurred: {graph_error}"
-                response_placeholder.markdown(full_response)
-                status_markdown = "\n".join(
-                    [f"- {s}" for s in final_run_status_history]
+                logger.error(
+                    f"Critical error during chat logic execution (graph execution): {e}",
+                    exc_info=True,
                 )
-                status_list_placeholder.markdown(status_markdown)
+                graph_error_occurred = e
+                full_response = f"Sorry, a critical system error occurred: {e}"
+                final_run_status_history.append(f"❌ System Error: {e}")
 
-                st.session_state.messages.append(
-                    {
-                        "role": "assistant",
-                        "content": full_response,
-                        "steps": final_run_status_history,
-                    }
-                )
+                if response_placeholder:
+                    response_placeholder.markdown(full_response)
+                if status_list_placeholder:
+                    status_markdown_exc = "\n".join(
+                        [f"- {s}" for s in final_run_status_history]
+                    )
+                    status_list_placeholder.markdown(status_markdown_exc)
+
+            st.session_state.messages.append(
+                {
+                    "role": "assistant",
+                    "content": full_response,
+                    "steps": final_run_status_history,
+                }
+            )
+
+            if (
+                transcribed_prompt_from_sidebar
+                and current_prompt_to_process == transcribed_prompt_from_sidebar
+            ):
+                if "audio_input_version" in st.session_state:
+                    st.session_state.audio_input_version += 1
+                    logger.debug(
+                        f"Incremented audio_input_version to: {st.session_state.audio_input_version} after processing sidebar voice input."
+                    )

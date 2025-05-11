@@ -202,29 +202,31 @@ def search_web(state: GraphState) -> Dict[str, Any]:
 
 
 def generate_answer(state: GraphState) -> Dict[str, Any]:
-    """Generates the final answer stream based on context and mode."""
     logger.info("Executing 'generate_answer' node.")
     query = state["query"]
-    context = state.get("context", "")
+    context = state.get("context", "") # Lấy context, mặc định là chuỗi rỗng nếu không có
     chat_history_list = state.get("chat_history", [])
-    run_history = state.get("run_status_history", [])
-
+    run_history = state.get("run_status_history", []) # Lấy lịch sử chạy hiện tại
     mode = state.get("chatbot_mode")
 
+    # 1. Lấy LLM
     llm = get_llm()
     if not llm:
         logger.error("LLM not available in generate_answer node.")
-
-        def error_stream():
+        def error_stream_no_llm():
             yield "Error: Language Model is unavailable."
-
+        run_history.append("❌ LLM Initialization Error: Model unavailable.")
         return {
-            "generation_stream": error_stream(),
+            "generation_stream": error_stream_no_llm(),
             "status_message": "LLM Initialization Error",
+            "run_status_history": run_history,
         }
 
+    # 2. Định dạng lịch sử chat
     formatted_history = format_chat_history(chat_history_list)
 
+    # 3. Chọn prompt template dựa trên chế độ
+    prompt_template = None
     if mode == "RAG":
         logger.debug("Using RAG prompt for generation.")
         prompt_template = create_rag_prompt()
@@ -236,57 +238,62 @@ def generate_answer(state: GraphState) -> Dict[str, Any]:
             f"Unknown mode '{mode}' in generate node, using Web Search prompt."
         )
         prompt_template = create_web_search_prompt()
+        run_history.append(f"⚠️ Unknown mode '{mode}', defaulted to Web Search prompt.")
 
+    # 4. Tạo generation chain (chỉ một lần)
+    generation_chain = None
     try:
         generation_chain = create_generation_chain(llm, prompt_template)
+        run_history.append("✅ Generation chain created.")
+        logger.info("Generation chain created successfully.")
     except ValueError as e:
         logger.error(f"Failed to create generation chain: {e}", exc_info=True)
-
-        def error_stream():
+        def error_stream_chain_creation():
             yield f"Error: Could not create generation chain - {e}"
-
+        run_history.append(f"❌ Chain Creation Error: {e}")
         return {
-            "generation_stream": error_stream(),
+            "generation_stream": error_stream_chain_creation(),
             "status_message": "Chain Creation Error",
+            "run_status_history": run_history,
         }
 
+    # 5. Chuẩn bị đầu vào cho chain
     chain_input = {
-        "query": state["query"],
-        "context": state.get("context", "No context provided."),
-        "chat_history": format_chat_history(state.get("chat_history", [])),
+        "query": query,
+        "context": context if context else "No context provided.", # Đảm bảo có giá trị mặc định
+        "chat_history": formatted_history,
     }
 
-    stream_to_return = iter([])
-    final_status = "Starting answer generation..."
+    stream_to_return = iter([])  # Mặc định là một iterator rỗng
+    final_status = "🚀 Starting answer generation..."
     run_history.append(final_status)
 
+    # 6. Thực thi chain và stream kết quả
     try:
-        generation_chain = create_generation_chain(
-            get_llm(),
-            (
-                create_rag_prompt()
-                if state.get("chatbot_mode") == "RAG"
-                else create_web_search_prompt()
-            ),
-        )
-        logger.info("Calling stream on generation_chain...")
+        logger.info(f"Calling stream on generation_chain with input: query='{str(query)[:50]}...', context_length={len(context)}")
         _raw_stream = generation_chain.stream(chain_input)
 
         if hasattr(_raw_stream, "__iter__") or hasattr(_raw_stream, "__aiter__"):
             stream_to_return = _raw_stream
-            final_status = "Receiving data from LLM..."
-            run_history.append(final_status)
+            final_status = "📥 Receiving data from LLM..."
             logger.info("Successfully started streaming from LLM.")
         else:
             logger.error(
                 f"generation_chain.stream did not return an iterator! Type: {type(_raw_stream)}"
             )
             final_status = "Error: Did not receive a valid stream from LLM."
-            run_history.append(final_status)
+            def error_stream_no_iterator():
+                yield "Error: LLM did not return a valid stream object."
+            stream_to_return = error_stream_no_iterator()
+        run_history.append(final_status) # Cập nhật trạng thái sau khi thử stream
+
     except Exception as e:
         logger.error(f"Error calling generation_chain.stream: {e}", exc_info=True)
         final_status = f"Error generating answer: {e}"
-        run_history.append(final_status)
+        run_history.append(f"❌ Error during answer generation: {e}")
+        def error_stream_exception_in_stream():
+            yield f"Sorry, an error occurred while generating the answer: {e}"
+        stream_to_return = error_stream_exception_in_stream()
 
     return {
         "generation_stream": stream_to_return,

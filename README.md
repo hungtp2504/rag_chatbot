@@ -1,6 +1,5 @@
 # RAG Chatbot (LangGraph - Pinecone - Tavily - Streamlit)
 
-
 ![til](demo.gif)
 
 
